@@ -2,7 +2,10 @@
   ================================================================================
   Project: EchoDesk – A Self-Learning Productivity Companion
   Module:  Module 1 - Hardware Sensing & Actuation (ESP32 Firmware)
-  File:    Arduino/EchoDesk_ESP32.ino
+  File:    Arduino/EchoDesk_ESP32/EchoDesk_ESP32.ino
+
+  IMPORTANT: The values printed to Serial MUST be the SAME variables shown on the OLED.
+  DHT11 requires: read humidity FIRST, then temperature (library reads both in one cycle).
   ================================================================================
 */
 
@@ -17,27 +20,28 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 #define DHTPIN 27
-#define DHTTYPE DHT22
+#define DHTTYPE DHT11
 DHT dht(DHTPIN, DHTTYPE);
 
 #define LDR_PIN    34
-#define BUZZER_PIN 16
+#define BUZZER_PIN 25
+
 
 String currentIdentity = "Owner";
 int currentFocusScore = 85;
 String currentRecommendation = "Good Productivity";
-float temperature = 24.5;
-float humidity = 50.0;
-int lightLux = 480;
+
+// Live sensor values (these are displayed on OLED AND sent via Serial)
+float temperature = 0.0;
+float humidity = 0.0;
+int lightLux = 0;
+bool sensorReady = false;
+
 unsigned long lastSensorRead = 0;
-const unsigned long sensorInterval = 1000;
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  Serial.println("ECHODESK_BOOT");
-  Serial.println("ESP32 ready");
-  
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(LDR_PIN, INPUT);
   digitalWrite(BUZZER_PIN, LOW);
@@ -52,70 +56,57 @@ void setup() {
   display.setCursor(15, 10);
   display.println("=== ECHODESK ===");
   display.setCursor(10, 30);
-  display.println("Calibrated System");
+  display.println("Real-Time Telemetry");
   display.setCursor(20, 48);
   display.println("Initializing...");
   display.display();
 
   dht.begin();
-  delay(2000);
-  Serial.println("DHT sensor initialized");
-  Serial.print("DHT model: ");
-  Serial.println(DHTTYPE == DHT22 ? "DHT22" : "OTHER");
-  Serial.print("DHT pin: ");
-  Serial.println(DHTPIN);
+  delay(2000); // DHT11 needs 2s warm-up before first reliable read
 }
 
 void loop() {
-  if (millis() - lastSensorRead >= sensorInterval) {
+  // Read sensors every 2000ms (DHT11 minimum reliable interval is ~2s)
+  if (millis() - lastSensorRead >= 2000) {
     lastSensorRead = millis();
 
-    float tempRead = dht.readTemperature(false);
+    // IMPORTANT: Read humidity FIRST - DHT library triggers full sensor read on readHumidity()
     float humRead = dht.readHumidity();
+    float tempRead = dht.readTemperature(false); // false = Celsius
     int rawLDR = analogRead(LDR_PIN);
 
-    Serial.print("RAW_DHT temp=");
-    Serial.print(tempRead, 2);
-    Serial.print(" hum=");
-    Serial.print(humRead, 2);
-    if (isnan(tempRead) || isnan(humRead)) {
-      Serial.print(" | STATUS=NO_DATA");
-    } else {
-      Serial.print(" | STATUS=OK");
-    }
-    Serial.println();
-
-    if (!isnan(tempRead) && tempRead > 45.0) {
-      tempRead = (tempRead - 32.0) * (5.0 / 9.0);
-    }
-
-    if (!isnan(tempRead) && tempRead >= -40.0 && tempRead <= 80.0) {
+    // Update temperature if valid
+    if (!isnan(tempRead)) {
+      // Auto-convert if sensor returns Fahrenheit (> 45)
+      if (tempRead > 45.0) {
+        tempRead = (tempRead - 32.0) * (5.0 / 9.0);
+      }
       temperature = tempRead;
-    } else {
-      Serial.println("DHT temp invalid, keeping previous value");
+      sensorReady = true;
     }
 
-    if (!isnan(humRead) && humRead >= 0.0 && humRead <= 100.0) {
+    // Update humidity if valid
+    if (!isnan(humRead)) {
       humidity = humRead;
-    } else {
-      Serial.println("DHT humidity invalid, keeping previous value");
+      sensorReady = true;
     }
 
+    // Convert 12-bit ADC (0-4095) to Lux
     float normalizedADC = (float)rawLDR / 4095.0;
-    lightLux = (int)(150.0 + (1.0 - normalizedADC) * 700.0);
-    if (lightLux < 100) lightLux = 100;
-    if (lightLux > 900) lightLux = 900;
+    lightLux = (int)(100.0 + (1.0 - normalizedADC) * 800.0);
+    if (lightLux < 50) lightLux = 50;
+    if (lightLux > 1000) lightLux = 1000;
 
+    // Transmit the EXACT same values that are shown on the OLED display
     Serial.print("TEMP:");
     Serial.print(temperature, 1);
     Serial.print(",HUM:");
     Serial.print(humidity, 1);
     Serial.print(",LIGHT:");
     Serial.println(lightLux);
-    Serial.println("---");
-    Serial.flush();
   }
 
+  // Read AI feedback from Python dashboard via Serial
   if (Serial.available() > 0) {
     String serialPacket = Serial.readStringUntil('\n');
     serialPacket.trim();
@@ -183,6 +174,7 @@ void updateOLEDDisplay() {
 
   display.drawLine(0, 38, 128, 38, SSD1306_WHITE);
 
+  // Display the SAME temperature/humidity/light variables sent over Serial
   display.setCursor(0, 42);
   display.print("T:");
   display.print(temperature, 1);
